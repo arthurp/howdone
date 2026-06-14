@@ -1,0 +1,13 @@
+prefix: run
+output_file: output.txt
+output_dir:
+  var: OUTPUT_DIR
+commands:
+  hostname: hostname
+  dirty.diff: git diff --stat HEAD
+  git_status.txt: git status
+  ps-ax.txt: ps ax
+  df.txt: df
+  mount.txt: mount
+  uname-all.txt: uname --all
+  lscpu.txt: lscpu
