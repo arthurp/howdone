@@ -1,4 +1,4 @@
-name_prefix: run
+prefix: run
 output_file: output.txt
 output_dir_var: OUTPUT_DIR
 commands:
