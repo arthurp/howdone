@@ -15,13 +15,13 @@ import yaml
 class CommandConfig:
     filename: str
     command: str
-    should_echo: bool
+    is_main: bool
 
 
 DEFAULT_CONFIG = {
     "prefix": "run",
     "output_file": "output.txt",
-    "output_dir_var": "OUTPUT_DIR",
+    "output_dir": {"var": "OUTPUT_DIR"},
     "commands": {},
 }
 
@@ -41,6 +41,40 @@ def load_config(config_file: Path) -> dict:
     """Load configuration from YAML file"""
     with open(config_file, "r") as f:
         return yaml.safe_load(f)
+
+
+def validate_output_dir_config(config: dict) -> None:
+    od = config.get("output_dir", {})
+    if not isinstance(od, dict):
+        print("Error: 'output_dir' must be a mapping", file=sys.stderr)
+        sys.exit(1)
+    if "arg" in od:
+        arg = od["arg"]
+        if isinstance(arg, str):
+            args_list = [arg]
+        elif isinstance(arg, list):
+            args_list = arg
+        else:
+            raise ValueError("output_dir.arg must be a string or list")
+        if not any("<OUTPUT_DIR>" in item for item in args_list):
+            raise ValueError("output_dir.arg must contain <OUTPUT_DIR> in at least one item")
+
+
+def substitute_output_dir(s: str, output_dir: Path) -> str:
+    return s.replace("<OUTPUT_DIR>", str(output_dir))
+
+
+def append_output_dir_arg(command, raw_arg, output_dir: Path):
+    if isinstance(command, str) and isinstance(raw_arg, str):
+        return command + " " + substitute_output_dir(raw_arg, output_dir)
+    elif isinstance(command, str) and isinstance(raw_arg, list):
+        joined = " ".join(substitute_output_dir(a, output_dir) for a in raw_arg)
+        return command + " " + joined
+    elif isinstance(command, list) and isinstance(raw_arg, str):
+        extra = [substitute_output_dir(x, output_dir) for x in raw_arg.split()]
+        return command + extra
+    else:  # both lists
+        return command + [substitute_output_dir(a, output_dir) for a in raw_arg]
 
 
 def format_command_line(command):
@@ -71,8 +105,12 @@ The configuration file is as follows:
 prefix: run
 # The file for the output of the main command
 output_file: output.txt
-# The name of the environment variable which is set to the output directory
-output_dir_var: OUTPUT_DIR
+# How the output directory is communicated to commands. Any or all sub-options may be set:
+#   var: set a named environment variable for all commands
+#   arg: append argument(s) with <OUTPUT_DIR> substituted to the main command only (string or list)
+#   cd: run all commands with cwd set to the output directory
+output_dir:
+  var: OUTPUT_DIR
 # A map of filenames to the commands which will be executed to fill them.
 commands:
   dirty.diff: git diff --stat HEAD
@@ -132,6 +170,12 @@ meta_config:
 
     # Load configuration
     config = {**DEFAULT_CONFIG, **load_config(config_filename)}
+    try:
+        validate_output_dir_config(config)
+    except ValueError as e:
+        print(f"Error: Invalid configuration: {e}", file=sys.stderr)
+        return 1
+    output_dir_config = config["output_dir"]
 
     output_dir: Path
     # Determine output directory
@@ -165,7 +209,7 @@ meta_config:
         yaml.dump(meta_data, f)
 
     commands_to_run = [
-        CommandConfig(filename=name, command=cmd, should_echo=False)
+        CommandConfig(filename=name, command=cmd, is_main=False)
         for name, cmd in config["commands"].items()
     ]
 
@@ -174,15 +218,16 @@ meta_config:
     if len(main_command) == 1:
         main_command = main_command[0]
 
+    if "arg" in output_dir_config:
+        main_command = append_output_dir_arg(main_command, output_dir_config["arg"], output_dir)
+
     commands_to_run.append(
-        CommandConfig(
-            filename=config["output_file"], command=main_command, should_echo=True
-        )
+        CommandConfig(filename=config["output_file"], command=main_command, is_main=True)
     )
 
     environ = dict(os.environ)
-    environ[config["output_dir_var"]] = str(output_dir)
-    print(environ)
+    if "var" in output_dir_config:
+        environ[output_dir_config["var"]] = str(output_dir)
 
     for cfg in commands_to_run:
         log_message(
@@ -192,12 +237,14 @@ meta_config:
             command_args = dict(args=cfg.command, shell=True)
         else:
             command_args = dict(args=cfg.command, shell=False)
+        cwd = str(output_dir) if output_dir_config.get("cd") else None
         process = subprocess.Popen(
             **command_args,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=environ,
+            cwd=cwd,
         )
 
         output_file = output_dir / cfg.filename
@@ -205,7 +252,7 @@ meta_config:
             f.write(f"{format_command_line(cfg.command)}\n\n")
             for line in process.stdout:
                 try:
-                    if cfg.should_echo:
+                    if cfg.is_main:
                         print(line, end="", flush=False)
                     f.write(line)
                     f.flush()
