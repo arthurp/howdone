@@ -8,7 +8,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    print("""\
+ERROR: PyYAML is not installed.
+You can either install it (e.g. apt install python3-yaml), or launch this script with uv: uv run howdone.py
+""", file=sys.stderr)
+    raise
 
 
 @dataclass
