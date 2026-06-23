@@ -14,7 +14,7 @@ import yaml
 @dataclass
 class CommandConfig:
     filename: str
-    command: str
+    command: str | list
     is_main: bool
 
 
@@ -64,7 +64,7 @@ def substitute_output_dir(s: str, output_dir: Path) -> str:
     return s.replace("<OUTPUT_DIR>", str(output_dir))
 
 
-def append_output_dir_arg(command, raw_arg, output_dir: Path):
+def append_output_dir_arg(command: list | str, raw_arg: list | str, output_dir: Path):
     if isinstance(command, str) and isinstance(raw_arg, str):
         return command + " " + substitute_output_dir(raw_arg, output_dir)
     elif isinstance(command, str) and isinstance(raw_arg, list):
@@ -73,8 +73,10 @@ def append_output_dir_arg(command, raw_arg, output_dir: Path):
     elif isinstance(command, list) and isinstance(raw_arg, str):
         extra = [substitute_output_dir(x, output_dir) for x in raw_arg.split()]
         return command + extra
-    else:  # both lists
+    elif isinstance(command, list) and isinstance(raw_arg, list):
         return command + [substitute_output_dir(a, output_dir) for a in raw_arg]
+    else:
+        raise ValueError("command and raw_arg must be list or str")
 
 
 def format_command_line(command):
@@ -106,7 +108,7 @@ prefix: run
 # The file for the output of the main command
 output_file: output.txt
 # How the output directory is communicated to commands. Any or all sub-options may be set:
-#   var: set a named environment variable for all commands
+#   var: set the named environment variable for all commands
 #   arg: append argument(s) with <OUTPUT_DIR> substituted to the main command only (string or list)
 #   cd: run all commands with cwd set to the output directory
 output_dir:
@@ -125,7 +127,7 @@ current_directory: <absolute path of the current directory when running all the 
 date: <date and time in ISO format, e.g. 2026-06-05T20:50:12>
 full_command: <full command line of the howdone invocation>
 meta_config:
-    <the configutation used by howdone>
+    <the configuration used by howdone>
 """,
     )
     parser.add_argument(
