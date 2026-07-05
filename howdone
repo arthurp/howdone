@@ -275,7 +275,30 @@ def run(args):
 
     cwd = str(output_dir) if output_dir_config.get("change_directory") else None
 
+    before_commands = []
+    after_commands = []
+
     for name, cmd in config["commands"].items():
+        # Check if cmd is a dict (with command and optional when fields) or a string
+        if isinstance(cmd, dict):
+            timing_str = cmd.get("when", "after")
+            if timing_str.lower() == "after":
+                run_before = False
+            elif timing_str.lower() == "before":
+                run_before = True
+            else:
+                print(f"Error: Invalid 'when' for command. Found '{timing_str}' in {cmd!r}", file=sys.stderr)
+                return 1
+            actual_cmd = cmd["command"]
+        else:
+            run_before = False
+            actual_cmd = cmd
+        if run_before:
+            before_commands.append((name, actual_cmd))
+        else:
+            after_commands.append((name, actual_cmd))
+
+    for name, cmd in before_commands:
         log_message(f"Running (output to {name}): {format_command_line(cmd)}")
         code = run_noninteractive(cmd, output_dir / name, environ, cwd)
         if code != 0:
@@ -294,6 +317,12 @@ def run(args):
     if code != 0:
         log_message(f"Command failed with code {code} (command was {format_command_line(main_command)})")
 
+    for name, cmd in after_commands:
+        log_message(f"Running (output to {name}): {format_command_line(cmd)}")
+        code = run_noninteractive(cmd, output_dir / name, environ, cwd)
+        if code != 0:
+            log_message(f"Command failed with code {code} (command was {format_command_line(cmd)})")
+
     return 0
 
 
@@ -305,7 +334,9 @@ Run a command and capture its output, along with provenance information, to a di
 
 The provenance information is based on a configuration file that specifies a set of commands to run. The output of each
 command is captured and stored in the output directory. All the commands are run with stdout and stderr combined to keep
-them aligned. Each output file begins with the command that generated it.
+them aligned. Each output file begins with the command that generated it. By default, commands are run after the main
+command from the command line (so they can access the output). However, by providing {_YK}when{_YR} for the command, it
+can run before the main command (see below for an example).
 
 The configuration file format is as follows:
 
@@ -324,7 +355,9 @@ The configuration file format is as follows:
   {_YK}dirty.diff{_YR}: {_YV}git diff --stat HEAD{_YR}
   {_YK}git-status.txt{_YR}: {_YV}git status{_YR}
   {_YK}uname-all.txt{_YR}: {_YV}uname --all{_YR}
-  {_YK}lscpu.txt{_YR}: {_YV}lscpu{_YR}
+  {_YK}start_date.txt{_YR}:
+    {_YK}command{_YR}: {_YV}date{_YR}
+    {_YK}when{_YR}: {_YV}before{_YR}
 
 The generated directory contains the files specified in the configuration and a file `meta.yaml` containing:
 
