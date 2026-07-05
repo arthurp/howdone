@@ -11,8 +11,10 @@ usage: howdone [-h] [-c CONFIG] [-n NAME] [-d DIR | -p PREFIX] cmd ...
 ## Description
 
 The provenance information is based on a configuration file that specifies a set of commands to run. The output of each
-command is captured and stored in the output directory. All commands are run with stdout and stderr combined to keep
-them aligned. Each output file begins with the command that generated it.
+command is captured and stored in the output directory. All the commands are run with stdout and stderr combined to keep
+them aligned. Each output file begins with the command that generated it. By default, commands are run after the main
+command from the command line (so they can access the output). However, by providing `when` for the command, it
+can run before the main command (see below for an example).
 
 ## Configuration
 
@@ -35,7 +37,9 @@ commands:
   dirty.diff: git diff --stat HEAD
   git-status.txt: git status
   uname-all.txt: uname --all
-  lscpu.txt: lscpu
+  start_date.txt:
+    command: date
+    when: before
 ```
 
 ## Output
