@@ -8,10 +8,12 @@
  
 import argparse
 import os
-import signal
+import pty
+import select
 import subprocess
 import sys
-from dataclasses import dataclass
+import termios
+import tty
 from datetime import datetime
 from pathlib import Path
 
@@ -25,21 +27,6 @@ You can either install it (e.g. apt install python3-yaml), or launch this script
 uv run {sys.argv[0]}
 """, file=sys.stderr)
     raise
-
-
-@dataclass
-class CommandConfig:
-    """
-    A command to run and capture.
-    """
-    filename: str
-    """The filename for output."""
-
-    command: str | list
-    """The command to run"""
-
-    is_main: bool
-    """Is this the main command? (it has special handling)"""
 
 
 # The default configuration which is overridden by the actual config file.
@@ -116,6 +103,115 @@ def log_message(msg, *args, **kwargs):
     print("[howdone] " + msg, *args, **kwargs)
 
 
+def popen_args(command: str | list) -> dict:
+    if isinstance(command, str):
+        return dict(args=command, shell=True)
+    else:
+        return dict(args=command, shell=False)
+
+
+def run_noninteractive(command: str | list, output_file: Path, environ: dict, cwd: str | None) -> int:
+    """Run a command, capturing stdout+stderr to output_file. Returns exit code."""
+    process = subprocess.Popen(
+        **popen_args(command),
+        text=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=environ,
+        cwd=cwd,
+    )
+    with open(output_file, "w") as f:
+        f.write(f"{format_command_line(command)}\n\n")
+        for line in process.stdout:
+            f.write(line)
+            f.flush()
+    code = process.wait()
+    if code != 0:
+        with open(output_file, "a") as f:
+            f.write(f"\nCommand failed with code {code}\n")
+    return code
+
+
+def run_interactive(command: str | list, output_file: Path, environ: dict, cwd: str | None) -> int:
+    """Run a command interactively via a PTY, teeing output to output_file. Returns exit code."""
+    header = f"{format_command_line(command)}\n\n"
+
+    if sys.stdin.isatty():
+        # The input is a TTY, handle TTY communication using a pty
+        parent_fd, child_fd = pty.openpty()
+        process = subprocess.Popen(
+            **popen_args(command),
+            stdin=child_fd,
+            stdout=child_fd,
+            stderr=child_fd,
+            close_fds=True,
+            env=environ,
+            cwd=cwd,
+        )
+        os.close(child_fd)
+
+        stdin_fd = sys.stdin.fileno()
+        stdout_fd = sys.stdout.fileno()
+        saved_attrs = termios.tcgetattr(stdin_fd)
+        try:
+            tty.setraw(stdin_fd)
+            with open(output_file, "wb") as f:
+                f.write(header.encode())
+                while True:
+                    try:
+                        readable, _, _ = select.select([parent_fd, stdin_fd], [], [])
+                    except (KeyboardInterrupt, InterruptedError):
+                        continue
+                    if parent_fd in readable:
+                        try:
+                            data = os.read(parent_fd, 4096)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+                        os.write(stdout_fd, data)
+                        f.write(data)
+                        f.flush()
+                    if stdin_fd in readable:
+                        try:
+                            data = os.read(stdin_fd, 4096)
+                        except OSError:
+                            break
+                        if data:
+                            os.write(parent_fd, data)
+        finally:
+            termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, saved_attrs)
+            os.close(parent_fd)
+    else:
+        # The input is not a TTY, so just do normal file I/O
+        process = subprocess.Popen(
+            **popen_args(command),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=environ,
+            cwd=cwd,
+        )
+
+        with open(output_file, "w") as f:
+            f.write(header)
+            for line in process.stdout:
+                try:
+                    print(line, end="", flush=False)
+                    f.write(line)
+                    f.flush()
+                except KeyboardInterrupt:
+                    # Pass SIGINT on to the child.
+                    process.send_signal(signal.SIGINT)
+
+    code = process.wait()
+    if code != 0:
+        with open(output_file, "ab") as f:
+            f.write(f"\nCommand failed with code {code}\n".encode())
+    return code
+
+
 _YR = "\033[0m"     # reset
 _YK = "\033[36m"    # key   - cyan
 _YV = "\033[33m"    # value - yellow
@@ -173,64 +269,31 @@ def run(args):
     with open(meta_file, "w") as f:
         yaml.dump(meta_data, f)
 
-    commands_to_run = [
-        CommandConfig(filename=name, command=cmd, is_main=False)
-        for name, cmd in config["commands"].items()
-    ]
+    environ = dict(os.environ)
+    if "variable" in output_dir_config:
+        environ[output_dir_config["variable"]] = str(output_dir)
+
+    cwd = str(output_dir) if output_dir_config.get("change_directory") else None
+
+    for name, cmd in config["commands"].items():
+        log_message(f"Running (output to {name}): {format_command_line(cmd)}")
+        code = run_noninteractive(cmd, output_dir / name, environ, cwd)
+        if code != 0:
+            log_message(f"Command failed with code {code} (command was {format_command_line(cmd)})")
 
     main_command = args.cmd
     # if the main command is a single element then unwrap it, so that it is run in a full shell.
     if len(main_command) == 1:
         main_command = main_command[0]
-
     if "argument" in output_dir_config:
         main_command = append_output_dir_arg(main_command, output_dir_config["argument"], output_dir)
 
-    commands_to_run.append(
-        CommandConfig(filename=config["output_file"], command=main_command, is_main=True)
-    )
+    output_file = output_dir / config["output_file"]
+    log_message(f"Running (output to {config['output_file']}): {format_command_line(main_command)}")
+    code = run_interactive(main_command, output_file, environ, cwd)
+    if code != 0:
+        log_message(f"Command failed with code {code} (command was {format_command_line(main_command)})")
 
-    environ = dict(os.environ)
-    if "variable" in output_dir_config:
-        environ[output_dir_config["variable"]] = str(output_dir)
-
-    for cfg in commands_to_run:
-        log_message(
-            f"Running (output to {cfg.filename}): {format_command_line(cfg.command)}"
-        )
-        if isinstance(cfg.command, str):
-            command_args = dict(args=cfg.command, shell=True)
-        else:
-            command_args = dict(args=cfg.command, shell=False)
-        cwd = str(output_dir) if output_dir_config.get("change_directory") else None
-        process = subprocess.Popen(
-            **command_args,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=environ,
-            cwd=cwd,
-        )
-
-        output_file = output_dir / cfg.filename
-        with open(output_file, "w") as f:
-            f.write(f"{format_command_line(cfg.command)}\n\n")
-            for line in process.stdout:
-                try:
-                    if cfg.is_main:
-                        print(line, end="", flush=False)
-                    f.write(line)
-                    f.flush()
-                except KeyboardInterrupt:
-                    # Pass SIGINT on to the child.
-                    process.send_signal(signal.SIGINT)
-
-            code = process.wait()
-            if code != 0:
-                log_message(
-                    f"Command failed with code {code} (command was {format_command_line(cfg.command)})"
-                )
-                f.write(f"\nCommand failed with code {code}\n")    
     return 0
 
 
