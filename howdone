@@ -10,6 +10,7 @@ import argparse
 import os
 import pty
 import select
+import signal
 import subprocess
 import sys
 import termios
@@ -121,11 +122,16 @@ def run_noninteractive(command: str | list, output_file: Path, environ: dict, cw
         env=environ,
         cwd=cwd,
     )
-    with open(output_file, "w") as f:
-        f.write(f"{format_command_line(command)}\n\n")
-        for line in process.stdout:
-            f.write(line)
-            f.flush()
+
+    try:
+        with open(output_file, "w") as f:
+            f.write(f"{format_command_line(command)}\n\n")
+            for line in process.stdout:
+                f.write(line)
+                f.flush()
+    except (IOError, OSError) as e:
+        log_message(f"Error occured while running {format_command_line(command)}\n{e}\nContinuing with other commands.")
+        
     code = process.wait()
     if code != 0:
         with open(output_file, "a") as f:
@@ -155,34 +161,35 @@ def run_interactive(command: str | list, output_file: Path, environ: dict, cwd: 
         stdout_fd = sys.stdout.fileno()
         saved_attrs = termios.tcgetattr(stdin_fd)
         try:
-            tty.setraw(stdin_fd)
-            with open(output_file, "wb") as f:
-                f.write(header.encode())
-                while True:
-                    try:
+            try:
+                tty.setraw(stdin_fd)
+                with open(output_file, "wb") as f:
+                    f.write(header.encode())
+                    while True:
                         readable, _, _ = select.select([parent_fd, stdin_fd], [], [])
-                    except (KeyboardInterrupt, InterruptedError):
-                        continue
-                    if parent_fd in readable:
-                        try:
-                            data = os.read(parent_fd, 4096)
-                        except OSError:
-                            break
-                        if not data:
-                            break
-                        os.write(stdout_fd, data)
-                        f.write(data)
-                        f.flush()
-                    if stdin_fd in readable:
-                        try:
-                            data = os.read(stdin_fd, 4096)
-                        except OSError:
-                            break
-                        if data:
-                            os.write(parent_fd, data)
-        finally:
-            termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, saved_attrs)
-            os.close(parent_fd)
+                        if parent_fd in readable:
+                            try:
+                                data = os.read(parent_fd, 4096)
+                            except OSError:
+                                break
+                            if not data:
+                                break
+                            os.write(stdout_fd, data)
+                            f.write(data)
+                            f.flush()
+                        if stdin_fd in readable:
+                            try:
+                                data = os.read(stdin_fd, 4096)
+                            except OSError:
+                                break
+                            if data:
+                                os.write(parent_fd, data)
+            finally:
+                termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, saved_attrs)
+                os.close(parent_fd)
+        except (IOError, OSError) as e:
+            log_message(f"Error occured while running {format_command_line(command)}\n{e}\nContinuing with other commands.")
+            raise
     else:
         # The input is not a TTY, so just do normal file I/O
         process = subprocess.Popen(
@@ -194,16 +201,19 @@ def run_interactive(command: str | list, output_file: Path, environ: dict, cwd: 
             cwd=cwd,
         )
 
-        with open(output_file, "w") as f:
-            f.write(header)
-            for line in process.stdout:
+        try:
+            with open(output_file, "w") as f:
+                f.write(header)
                 try:
-                    print(line, end="", flush=False)
-                    f.write(line)
-                    f.flush()
+                    for line in process.stdout:
+                            print(line, end="", flush=False)
+                            f.write(line)
+                            f.flush()
                 except KeyboardInterrupt:
                     # Pass SIGINT on to the child.
                     process.send_signal(signal.SIGINT)
+        except (IOError, OSError) as e:
+            log_message(f"Error occured while running {format_command_line(command)}\n{e}\nContinuing with other commands.")
 
     code = process.wait()
     if code != 0:
@@ -281,13 +291,13 @@ def run(args):
     for name, cmd in config["commands"].items():
         # Check if cmd is a dict (with command and optional when fields) or a string
         if isinstance(cmd, dict):
-            timing_str = cmd.get("when", "after")
-            if timing_str.lower() == "after":
+            when_str = cmd.get("when", "after")
+            if when_str.lower() == "after":
                 run_before = False
-            elif timing_str.lower() == "before":
+            elif when_str.lower() == "before":
                 run_before = True
             else:
-                print(f"Error: Invalid 'when' for command. Found '{timing_str}' in {cmd!r}", file=sys.stderr)
+                print(f"Error: Invalid 'when' for command. Found '{when_str}' in {cmd!r}", file=sys.stderr)
                 return 1
             actual_cmd = cmd["command"]
         else:
